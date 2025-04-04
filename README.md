@@ -2,9 +2,9 @@
 
 A visually engaging particle simulation built with Three.js, visualizing abstract field lines emanating from a central source.
 
-**Live Demo:** [(https://bytetrooper.github.io/Field-Lines-Simulation/)]
+**Live Demo:** https://bytetrooper.github.io/Field-Lines-Simulation/
 
-[!![image](https://github.com/user-attachments/assets/7a9de9b0-06fb-4e23-9bb7-38389c272f58)]
+![image](https://github.com/user-attachments/assets/7a9de9b0-06fb-4e23-9bb7-38389c272f58)
 
 ## Description
 
