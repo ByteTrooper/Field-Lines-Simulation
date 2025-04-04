@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Field Lines Simulation</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; color: #fff; font-family: 'Inter', sans-serif; }
+        canvas { display: block; }
+        #info {
+            position: absolute;
+            top: 10px;
+            width: 100%;
+            text-align: center;
+            z-index: 100;
+            display:block;
+            color: rgba(255, 255, 255, 0.7);
+            font-size: 14px;
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 20px;
+            z-index: 200;
+        }
+        /* Style dat.gui */
+        .dg.main .close-button { background-color: rgba(0,0,0,0.5); }
+        .dg.main .close-button:hover { background-color: rgba(0,0,0,0.7); }
+        .dg li:not(.folder) { background: rgba(0,0,0,0.5); border-bottom: 1px solid #222; }
+        .dg li.title { background: rgba(0,0,0,0.7) !important; border-bottom: 1px solid #333; }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div id="info">Field Lines Simulation</div>
+    <div id="loading">Loading Assets...</div>
+    <div id="container"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        // Import necessary Three.js modules
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { GUI } from 'three/addons/libs/lil-gui.module.min.js'; // GUI library
+
+        // --- Global Variables ---
+        let scene, camera, renderer, controls, composer, bloomPass;
+        let centralSphere;
+        let fieldLinesGroup; // Group to hold all the field line particle systems
+        let clock = new THREE.Clock();
+
+        // Parameters for GUI
+        const params = {
+            numLines: 128,          // Number of field lines
+            pointsPerLine: 150,    // Number of points making up each line
+            fieldStrength: 15.0,   // Controls the extent/spread of the lines
+            particleSize: 0.1,
+            particleColor: 0xffaa00, // Orange/Yellow color
+            centralSphereColor: 0xffffff,
+            centralSphereWireframe: true,
+            bloomStrength: 0.8,
+            bloomThreshold: 0.1,
+            bloomRadius: 0.5,
+            animateLines: false, // Optional: Add animation later
+            animationSpeed: 0.1
+        };
+
+        // --- Initialization ---
+        function init() {
+            const container = document.getElementById('container');
+
+            // Scene
+            scene = new THREE.Scene();
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.z = 35; // Start further back
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true }); // No alpha needed if background is black
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setClearColor(0x000000); // Black background
+            container.appendChild(renderer.domElement);
+
+            // Controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 5;
+            controls.maxDistance = 150; // Allow zooming out further
+
+            // Lighting
+            scene.add(new THREE.AmbientLight(0x404040)); // Dim ambient light
+            const pointLight = new THREE.PointLight(0xffffff, 1, 200); // Brighter point light
+            pointLight.position.set(0, 0, 20); // Position light
+            scene.add(pointLight);
+
+            // --- Create Scene Objects ---
+
+            // 1. Central Sphere
+            const sphereGeometry = new THREE.SphereGeometry(4, 32, 32); // Radius 4
+            const sphereMaterial = new THREE.MeshBasicMaterial({
+                color: params.centralSphereColor,
+                wireframe: params.centralSphereWireframe,
+            });
+            centralSphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+            scene.add(centralSphere);
+
+            // 2. Field Lines Group
+            fieldLinesGroup = new THREE.Group();
+            scene.add(fieldLinesGroup);
+            createFieldLines(); // Initial creation
+
+            // --- Post Processing ---
+            composer = new EffectComposer(renderer);
+            const renderPass = new RenderPass(scene, camera);
+            composer.addPass(renderPass);
+
+            bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+            bloomPass.threshold = params.bloomThreshold;
+            bloomPass.strength = params.bloomStrength;
+            bloomPass.radius = params.bloomRadius;
+            composer.addPass(bloomPass);
+
+            // --- GUI Controls ---
+            setupGUI();
+
+            // --- Event Listeners ---
+            window.addEventListener('resize', onWindowResize);
+
+            // Hide loading indicator
+            document.getElementById('loading').style.display = 'none';
+        }
+
+        // --- Helper Functions ---
+
+        // Function to generate points for a single field line (dipole-like)
+        function generateLinePoints(lineIndex, totalLines, pointsPerLine, strength) {
+            const points = [];
+            const startTheta = (lineIndex / totalLines) * Math.PI * 2; // Angle around Y axis
+            const startPhi = Math.PI / 2; // Start at equator for simplicity
+
+            // Rotate the starting point around the Y axis
+            const startVec = new THREE.Vector3(1, 0, 0); // Start on X axis
+            startVec.applyAxisAngle(new THREE.Vector3(0, 1, 0), startTheta);
+            startVec.multiplyScalar(centralSphere.geometry.parameters.radius + 0.1); // Start just outside sphere
+
+            let currentPos = startVec.clone();
+            let currentTheta = startTheta; // Angle around Y
+            let currentPhi = Math.PI/2; // Angle from +Z axis (polar angle)
+
+
+            for (let i = 0; i < pointsPerLine; i++) {
+                // Simple parametric curve resembling dipole lines
+                // Move along a curve that loops back towards the poles
+                const t = (i / pointsPerLine) * Math.PI; // Parameter from 0 to PI
+
+                // Calculate radius based on t (larger in middle, smaller at ends)
+                const r = centralSphere.geometry.parameters.radius + strength * Math.sin(t) * (1 + Math.cos(t)*0.5);
+
+                // Calculate position using spherical coordinates based on the starting angle 'startTheta'
+                // We modify the polar angle 'phi' based on 't' to make it loop
+                const phi = Math.PI/2 - Math.cos(t) * (Math.PI/2 + 0.2); // Loop from equator towards poles
+
+                const x = r * Math.sin(phi) * Math.cos(startTheta);
+                const y = r * Math.cos(phi); // Use cos(phi) for Y to loop towards poles
+                const z = r * Math.sin(phi) * Math.sin(startTheta);
+
+                points.push(new THREE.Vector3(x, y, z));
+            }
+            return points;
+        }
+
+
+        // Function to create/recreate all field lines
+        function createFieldLines() {
+            // Remove existing lines
+            while (fieldLinesGroup.children.length > 0) {
+                const child = fieldLinesGroup.children[0];
+                if (child.geometry) child.geometry.dispose();
+                if (child.material) child.material.dispose();
+                fieldLinesGroup.remove(child);
+            }
+
+            const particleMaterial = new THREE.PointsMaterial({
+                color: params.particleColor,
+                size: params.particleSize,
+                blending: THREE.AdditiveBlending, // Good for glowing particles
+                transparent: true,
+                depthWrite: false, // Prevent particles from obscuring each other harshly
+                sizeAttenuation: true // Make particles smaller further away
+            });
+
+            for (let i = 0; i < params.numLines; i++) {
+                const linePoints = generateLinePoints(i, params.numLines, params.pointsPerLine, params.fieldStrength);
+
+                const geometry = new THREE.BufferGeometry().setFromPoints(linePoints);
+                // Optional: Add attributes for animation later
+                // const phase = new Float32Array(params.pointsPerLine);
+                // for(let j=0; j<params.pointsPerLine; ++j) phase[j] = Math.random();
+                // geometry.setAttribute('phase', new THREE.BufferAttribute(phase, 1));
+
+                const points = new THREE.Points(geometry, particleMaterial); // Use shared material for performance
+                fieldLinesGroup.add(points);
+            }
+        }
+
+        // Function to update central sphere appearance
+        function updateCentralSphere() {
+            if (centralSphere) {
+                centralSphere.material.wireframe = params.centralSphereWireframe;
+                centralSphere.material.color.setHex(params.centralSphereColor);
+            }
+        }
+
+        // Function to setup GUI controls
+        function setupGUI() {
+            const gui = new GUI();
+            gui.title("Field Controls");
+
+            const lineFolder = gui.addFolder('Field Lines');
+            lineFolder.add(params, 'numLines', 10, 500, 1).name('Number of Lines').onFinishChange(createFieldLines);
+            lineFolder.add(params, 'pointsPerLine', 10, 500, 1).name('Points per Line').onFinishChange(createFieldLines);
+            lineFolder.add(params, 'fieldStrength', 1, 50).name('Field Strength').onFinishChange(createFieldLines);
+            // lineFolder.close();
+
+            const appearanceFolder = gui.addFolder('Appearance');
+            appearanceFolder.add(params, 'particleSize', 0.01, 1.0).name('Particle Size').onChange(() => {
+                 // Update existing material - more efficient than recreating
+                 fieldLinesGroup.children.forEach(child => {
+                     if (child.material) child.material.size = params.particleSize;
+                 });
+            });
+             appearanceFolder.addColor(params, 'particleColor').name('Particle Color').onChange(() => {
+                 fieldLinesGroup.children.forEach(child => {
+                     if (child.material) child.material.color.setHex(params.particleColor);
+                 });
+             });
+            appearanceFolder.addColor(params, 'centralSphereColor').name('Sphere Color').onChange(updateCentralSphere);
+            appearanceFolder.add(params, 'centralSphereWireframe').name('Sphere Wireframe').onChange(updateCentralSphere);
+            // appearanceFolder.close();
+
+            const bloomFolder = gui.addFolder('Bloom Effect');
+            bloomFolder.add(params, 'bloomStrength', 0, 3).onChange(v => bloomPass.strength = v);
+            bloomFolder.add(params, 'bloomThreshold', 0, 1).onChange(v => bloomPass.threshold = v);
+            bloomFolder.add(params, 'bloomRadius', 0, 2).onChange(v => bloomPass.radius = v);
+            // bloomFolder.close();
+
+            // Optional Animation Controls (if implemented)
+            // const animFolder = gui.addFolder('Animation');
+            // animFolder.add(params, 'animateLines');
+            // animFolder.add(params, 'animationSpeed', 0, 1.0);
+        }
+
+
+        // --- Event Handlers ---
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // --- Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const delta = clock.getDelta();
+            const time = clock.getElapsedTime();
+
+            controls.update(); // Update controls if damping is enabled
+
+            // Optional: Add animation logic here if params.animateLines is true
+            // Example: Update a 'u_time' uniform in a custom shader material for the points
+
+            // Rotate the whole group slightly for effect
+            fieldLinesGroup.rotation.y += delta * 0.02;
+            centralSphere.rotation.y += delta * 0.03;
+
+            // Render scene with post-processing
+            composer.render();
+        }
+
+        // --- Start ---
+        init();
+        animate();
+
+    </script>
+</body>
+</html>
